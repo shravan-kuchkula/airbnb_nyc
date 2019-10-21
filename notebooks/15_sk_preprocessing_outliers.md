@@ -1,0 +1,4802 @@
+## New York City Airbnb Pre-processing
+Two important preprocessing tasks for models that rely on distance metrics are:
+* Dealing with Outliers
+* Scaling data
+
+In this notebook, I will first identify features with outliers and decide whether keeping these outliers is necessary for the overall analysis or not. Secondly, I will explore three different types of Scaling techniques and choose the one that is most relevant to our analysis.
+
+## Get the data
+Read in the data that was cleaned as part of this blog post: [New York City Airbnb Data Cleaning](https://shravan-kuchkula.github.io/nyc-airbnb-data-cleaning/) . The cleansed dataset is loaded from `s3://skuchkula-sagemaker-airbnb/airbnb_clean.csv`.
+
+
+```python
+# data managing and display libs
+import pandas as pd
+import numpy as np
+import os
+import io
+
+import matplotlib.pyplot as plt
+import matplotlib
+%matplotlib inline 
+
+# sagemaker libraries
+import boto3
+```
+
+
+```python
+df_airbnb = pd.read_csv('airbnb_clean.csv')
+```
+
+## Identifying outliers
+The first step here is to isolate numeric features from text/categorical features. Shown below are the columns which are either text/categorical in nature. I have also excluded some features which don't make much sense in the context of the problem.
+
+
+```python
+drop_cols = list(df_airbnb.select_dtypes(['O']).columns) + ['id', 'latitude', 'longitude', 'maximum_nights']
+drop_cols
+```
+
+
+
+
+    ['name',
+     'summary',
+     'description',
+     'host_verifications',
+     'neighbourhood_cleansed',
+     'neighbourhood_group_cleansed',
+     'amenities',
+     'id',
+     'latitude',
+     'longitude',
+     'maximum_nights']
+
+
+
+
+```python
+df_airbnb.drop(drop_cols, axis=1, inplace=True)
+```
+
+Ensure that all the columns are in `float64` format.
+
+
+```python
+# convert all these to float64
+df_airbnb = df_airbnb.astype(float)
+```
+
+
+```python
+df_airbnb.info(verbose=True)
+```
+
+    <class 'pandas.core.frame.DataFrame'>
+    RangeIndex: 45605 entries, 0 to 45604
+    Data columns (total 56 columns):
+    host_listings_count                                45605 non-null float64
+    host_total_listings_count                          45605 non-null float64
+    accommodates                                       45605 non-null float64
+    bathrooms                                          45605 non-null float64
+    bedrooms                                           45605 non-null float64
+    beds                                               45605 non-null float64
+    price                                              45605 non-null float64
+    guests_included                                    45605 non-null float64
+    extra_people                                       45605 non-null float64
+    minimum_nights                                     45605 non-null float64
+    availability_30                                    45605 non-null float64
+    availability_60                                    45605 non-null float64
+    availability_90                                    45605 non-null float64
+    availability_365                                   45605 non-null float64
+    number_of_reviews                                  45605 non-null float64
+    number_of_reviews_ltm                              45605 non-null float64
+    calculated_host_listings_count                     45605 non-null float64
+    calculated_host_listings_count_entire_homes        45605 non-null float64
+    calculated_host_listings_count_private_rooms       45605 non-null float64
+    calculated_host_listings_count_shared_rooms        45605 non-null float64
+    host_is_superhost_f                                45605 non-null float64
+    host_is_superhost_t                                45605 non-null float64
+    host_has_profile_pic_f                             45605 non-null float64
+    host_has_profile_pic_t                             45605 non-null float64
+    host_identity_verified_f                           45605 non-null float64
+    host_identity_verified_t                           45605 non-null float64
+    is_location_exact_f                                45605 non-null float64
+    is_location_exact_t                                45605 non-null float64
+    property_type_Apartment                            45605 non-null float64
+    property_type_Condominium                          45605 non-null float64
+    property_type_House                                45605 non-null float64
+    property_type_Townhouse                            45605 non-null float64
+    room_type_Entire home/apt                          45605 non-null float64
+    room_type_Private room                             45605 non-null float64
+    room_type_Shared room                              45605 non-null float64
+    bed_type_Airbed                                    45605 non-null float64
+    bed_type_Couch                                     45605 non-null float64
+    bed_type_Futon                                     45605 non-null float64
+    bed_type_Pull-out Sofa                             45605 non-null float64
+    bed_type_Real Bed                                  45605 non-null float64
+    has_availability_t                                 45605 non-null float64
+    requires_license_f                                 45605 non-null float64
+    requires_license_t                                 45605 non-null float64
+    instant_bookable_f                                 45605 non-null float64
+    instant_bookable_t                                 45605 non-null float64
+    is_business_travel_ready_f                         45605 non-null float64
+    cancellation_policy_flexible                       45605 non-null float64
+    cancellation_policy_moderate                       45605 non-null float64
+    cancellation_policy_strict                         45605 non-null float64
+    cancellation_policy_strict_14_with_grace_period    45605 non-null float64
+    cancellation_policy_super_strict_30                45605 non-null float64
+    cancellation_policy_super_strict_60                45605 non-null float64
+    require_guest_profile_picture_f                    45605 non-null float64
+    require_guest_profile_picture_t                    45605 non-null float64
+    require_guest_phone_verification_f                 45605 non-null float64
+    require_guest_phone_verification_t                 45605 non-null float64
+    dtypes: float64(56)
+    memory usage: 19.5 MB
+
+
+`outlier_stats` takes a dataframe and returns outlier statistics for that dataframe. One standard way of identifying outliers is using this formula
+> Formula: {data_point < first quartile – (1.5) * IQR} (or) {data_point > third quartile + (1.5) * IQR}
+
+
+```python
+# Check if each value of mySeries lies within the outlier range.
+# If the value is greater than upperOutlier mark it True
+# If the value is lower than lowerOutlier mark it True
+# return the total number of outliers for that series.
+def numberOfOutliers(mySeries, upperOutlier, lowerOutlier):
+    return sum((mySeries > upperOutlier.loc[mySeries.name, ]) |\
+               (mySeries < lowerOutlier.loc[mySeries.name,]))
+
+def outlier_stats(df):
+    numericDescribe = (df.describe(include='all').T).round(decimals=3)
+    
+    # Calculate outliers using this formula: first quartile – 1.5·IQR > outlier > third quartile + 1.5·IQR
+    numericDescribe['IQR'] = numericDescribe['75%'] - numericDescribe['25%']
+    numericDescribe['outliers'] = (numericDescribe['max'] > (numericDescribe['75%'] + (1.5 * numericDescribe['IQR']))) \
+                            | (numericDescribe['min'] < (numericDescribe['25%'] - (1.5 * numericDescribe['IQR'])))
+    
+    # Calculate IQR for each column of the dataframe.
+    IQR = df.quantile(.75) - df.quantile(.25)
+    
+    # Calculate the upper and lower outlier values
+    upperOutlier = df.quantile(.75) + (1.5 * (IQR))
+    lowerOutlier = df.quantile(.25) - (1.5 * (IQR))
+    
+    # Store the result in a new column
+    numericDescribe['num_outliers'] = df.apply(numberOfOutliers, args=(upperOutlier, lowerOutlier))
+    numericDescribe.sort_values('num_outliers', ascending=False, inplace=True)
+    newColOrder = ['count', 'outliers', 'num_outliers', 'IQR', 'mean', 'std', \
+               'min', '25%', '50%', '75%', 'max']
+    numericDescribe = numericDescribe.reindex(columns=newColOrder)
+    
+    return numericDescribe
+```
+
+
+```python
+outlier_stats_df = outlier_stats(df_airbnb)
+outlier_stats_df
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>count</th>
+      <th>outliers</th>
+      <th>num_outliers</th>
+      <th>IQR</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>min</th>
+      <th>25%</th>
+      <th>50%</th>
+      <th>75%</th>
+      <th>max</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>bedrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>12668</td>
+      <td>0.0</td>
+      <td>1.179</td>
+      <td>0.741</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>14.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_moderate</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10558</td>
+      <td>0.0</td>
+      <td>0.232</td>
+      <td>0.422</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.0</td>
+      <td>0.808</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.0</td>
+      <td>0.192</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.0</td>
+      <td>0.827</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.0</td>
+      <td>0.173</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Apartment</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7000</td>
+      <td>0.0</td>
+      <td>0.847</td>
+      <td>0.360</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bathrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6949</td>
+      <td>0.0</td>
+      <td>1.143</td>
+      <td>0.428</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>15.5</td>
+    </tr>
+    <tr>
+      <th>host_total_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6858</td>
+      <td>1.0</td>
+      <td>14.828</td>
+      <td>90.301</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>1465.0</td>
+    </tr>
+    <tr>
+      <th>host_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6858</td>
+      <td>1.0</td>
+      <td>14.828</td>
+      <td>90.301</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>1465.0</td>
+    </tr>
+    <tr>
+      <th>minimum_nights</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6107</td>
+      <td>4.0</td>
+      <td>7.079</td>
+      <td>20.644</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>3.0</td>
+      <td>5.0</td>
+      <td>1250.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6034</td>
+      <td>1.0</td>
+      <td>7.317</td>
+      <td>35.596</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>343.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5618</td>
+      <td>23.0</td>
+      <td>23.397</td>
+      <td>45.101</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>5.0</td>
+      <td>24.0</td>
+      <td>639.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews_ltm</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5360</td>
+      <td>11.0</td>
+      <td>9.109</td>
+      <td>15.985</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>2.0</td>
+      <td>11.0</td>
+      <td>359.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_private_rooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5014</td>
+      <td>1.0</td>
+      <td>1.485</td>
+      <td>6.507</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>115.0</td>
+    </tr>
+    <tr>
+      <th>availability_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>4129</td>
+      <td>10.0</td>
+      <td>6.614</td>
+      <td>9.460</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>10.0</td>
+      <td>30.0</td>
+    </tr>
+    <tr>
+      <th>property_type_House</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3846</td>
+      <td>0.0</td>
+      <td>0.084</td>
+      <td>0.278</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>guests_included</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3261</td>
+      <td>1.0</td>
+      <td>1.510</td>
+      <td>1.138</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>16.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_entire_homes</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3152</td>
+      <td>1.0</td>
+      <td>5.728</td>
+      <td>34.625</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>335.0</td>
+    </tr>
+    <tr>
+      <th>beds</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2412</td>
+      <td>1.0</td>
+      <td>1.542</td>
+      <td>1.108</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>40.0</td>
+    </tr>
+    <tr>
+      <th>price</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2359</td>
+      <td>108.0</td>
+      <td>146.268</td>
+      <td>226.386</td>
+      <td>0.0</td>
+      <td>67.0</td>
+      <td>100.0</td>
+      <td>175.0</td>
+      <td>10000.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Townhouse</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1659</td>
+      <td>0.0</td>
+      <td>0.036</td>
+      <td>0.187</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_shared_rooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1539</td>
+      <td>0.0</td>
+      <td>0.104</td>
+      <td>0.944</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>23.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Condominium</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1495</td>
+      <td>0.0</td>
+      <td>0.033</td>
+      <td>0.178</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>extra_people</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1349</td>
+      <td>25.0</td>
+      <td>14.257</td>
+      <td>24.298</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>25.0</td>
+      <td>300.0</td>
+    </tr>
+    <tr>
+      <th>accommodates</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1261</td>
+      <td>2.0</td>
+      <td>2.819</td>
+      <td>1.848</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>2.0</td>
+      <td>4.0</td>
+      <td>26.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.0</td>
+      <td>0.976</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.0</td>
+      <td>0.024</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Shared room</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1062</td>
+      <td>0.0</td>
+      <td>0.023</td>
+      <td>0.151</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.0</td>
+      <td>0.978</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Real Bed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>750</td>
+      <td>0.0</td>
+      <td>0.984</td>
+      <td>0.127</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Futon</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>280</td>
+      <td>0.0</td>
+      <td>0.006</td>
+      <td>0.078</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Pull-out Sofa</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>240</td>
+      <td>0.0</td>
+      <td>0.005</td>
+      <td>0.072</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Airbed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>166</td>
+      <td>0.0</td>
+      <td>0.004</td>
+      <td>0.060</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.998</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_60</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Couch</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>64</td>
+      <td>0.0</td>
+      <td>0.001</td>
+      <td>0.037</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>22</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.022</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.010</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict_14_with_grace_period</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.448</td>
+      <td>0.497</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.484</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_flexible</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.318</td>
+      <td>0.466</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_90</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>47.0</td>
+      <td>24.799</td>
+      <td>30.896</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>8.0</td>
+      <td>47.0</td>
+      <td>90.0</td>
+    </tr>
+    <tr>
+      <th>availability_365</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>220.0</td>
+      <td>108.421</td>
+      <td>130.655</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>35.0</td>
+      <td>220.0</td>
+      <td>365.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>is_business_travel_ready_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.366</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.634</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.516</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>has_availability_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_60</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>26.0</td>
+      <td>14.747</td>
+      <td>19.611</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>4.0</td>
+      <td>26.0</td>
+      <td>60.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Entire home/apt</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.515</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Private room</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.462</td>
+      <td>0.499</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+## Dealing with outliers
+From the above output, we can clearly see that the price column and couple of others have outliers. Using subject matter expertise, we must investigate these outliers individually. For instance the *host_listings* and *minimum_nights* have absurdly high values which could be an error on the part of the owner in entering these values. Alternatively, these could be special properties which are not open for all customers but reserved for people who want to *sub-lease* these properties. By including this feature in our analysis may skew our principal components as these might get more weightage over other features in the dataset. For this reason, I decided to drop these columns.
+
+*price* has many outliers, however, upon closer examination, it was observed that the price given was for minimum_nights and not per night. For this reason, I have constructed a new feature here called **price_adjusted** which is the price per night. 
+
+
+```python
+df_airbnb['price_adjusted'] = df_airbnb['price'] / df_airbnb['minimum_nights']
+```
+
+
+```python
+df_airbnb.drop(['price', 'minimum_nights'], axis='columns', inplace=True)
+```
+
+
+```python
+drop_more_cols = ['host_total_listings_count',
+                  'host_listings_count',
+                 'host_total_listings_count',
+                 'calculated_host_listings_count_entire_homes',
+                 'calculated_host_listings_count_private_rooms',
+                 'availability_365']
+```
+
+
+```python
+df_airbnb.drop(drop_more_cols, axis=1, inplace=True)
+```
+
+
+```python
+outlier_stats(df_airbnb)
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>count</th>
+      <th>outliers</th>
+      <th>num_outliers</th>
+      <th>IQR</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>min</th>
+      <th>25%</th>
+      <th>50%</th>
+      <th>75%</th>
+      <th>max</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>bedrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>12668</td>
+      <td>0.0</td>
+      <td>1.179</td>
+      <td>0.741</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>14.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_moderate</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10558</td>
+      <td>0.0</td>
+      <td>0.232</td>
+      <td>0.422</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.0</td>
+      <td>0.192</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.0</td>
+      <td>0.808</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.0</td>
+      <td>0.173</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.0</td>
+      <td>0.827</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Apartment</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7000</td>
+      <td>0.0</td>
+      <td>0.847</td>
+      <td>0.360</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bathrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6949</td>
+      <td>0.0</td>
+      <td>1.143</td>
+      <td>0.428</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>15.5</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6034</td>
+      <td>1.0</td>
+      <td>7.317</td>
+      <td>35.596</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>343.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5618</td>
+      <td>23.0</td>
+      <td>23.397</td>
+      <td>45.101</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>5.0</td>
+      <td>24.0</td>
+      <td>639.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews_ltm</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5360</td>
+      <td>11.0</td>
+      <td>9.109</td>
+      <td>15.985</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>2.0</td>
+      <td>11.0</td>
+      <td>359.0</td>
+    </tr>
+    <tr>
+      <th>availability_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>4129</td>
+      <td>10.0</td>
+      <td>6.614</td>
+      <td>9.460</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>10.0</td>
+      <td>30.0</td>
+    </tr>
+    <tr>
+      <th>property_type_House</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3846</td>
+      <td>0.0</td>
+      <td>0.084</td>
+      <td>0.278</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>guests_included</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3261</td>
+      <td>1.0</td>
+      <td>1.510</td>
+      <td>1.138</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>16.0</td>
+    </tr>
+    <tr>
+      <th>price_adjusted</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2798</td>
+      <td>60.0</td>
+      <td>65.534</td>
+      <td>130.939</td>
+      <td>0.0</td>
+      <td>19.8</td>
+      <td>43.0</td>
+      <td>79.8</td>
+      <td>8000.0</td>
+    </tr>
+    <tr>
+      <th>beds</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2412</td>
+      <td>1.0</td>
+      <td>1.542</td>
+      <td>1.108</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>40.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Townhouse</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1659</td>
+      <td>0.0</td>
+      <td>0.036</td>
+      <td>0.187</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_shared_rooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1539</td>
+      <td>0.0</td>
+      <td>0.104</td>
+      <td>0.944</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>23.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Condominium</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1495</td>
+      <td>0.0</td>
+      <td>0.033</td>
+      <td>0.178</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>extra_people</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1349</td>
+      <td>25.0</td>
+      <td>14.257</td>
+      <td>24.298</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>25.0</td>
+      <td>300.0</td>
+    </tr>
+    <tr>
+      <th>accommodates</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1261</td>
+      <td>2.0</td>
+      <td>2.819</td>
+      <td>1.848</td>
+      <td>1.0</td>
+      <td>2.0</td>
+      <td>2.0</td>
+      <td>4.0</td>
+      <td>26.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.0</td>
+      <td>0.024</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.0</td>
+      <td>0.976</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Shared room</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1062</td>
+      <td>0.0</td>
+      <td>0.023</td>
+      <td>0.151</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.0</td>
+      <td>0.978</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Real Bed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>750</td>
+      <td>0.0</td>
+      <td>0.984</td>
+      <td>0.127</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Futon</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>280</td>
+      <td>0.0</td>
+      <td>0.006</td>
+      <td>0.078</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Pull-out Sofa</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>240</td>
+      <td>0.0</td>
+      <td>0.005</td>
+      <td>0.072</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Airbed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>166</td>
+      <td>0.0</td>
+      <td>0.004</td>
+      <td>0.060</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_60</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.998</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Couch</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>64</td>
+      <td>0.0</td>
+      <td>0.001</td>
+      <td>0.037</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>22</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.022</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.010</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_60</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>26.0</td>
+      <td>14.747</td>
+      <td>19.611</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>4.0</td>
+      <td>26.0</td>
+      <td>60.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict_14_with_grace_period</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.448</td>
+      <td>0.497</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.484</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_flexible</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.318</td>
+      <td>0.466</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_business_travel_ready_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.366</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.634</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.516</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>has_availability_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Private room</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.462</td>
+      <td>0.499</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_90</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>47.0</td>
+      <td>24.799</td>
+      <td>30.896</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>8.0</td>
+      <td>47.0</td>
+      <td>90.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Entire home/apt</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.515</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+
+```python
+df=df_airbnb.copy()
+```
+
+## Scaling
+Many machine learning algorithms work better when features are on a relatively similar scale and close to normally distributed. MinMaxScaler, RobustScaler, StandardScaler, and Normalizer are scikit-learn methods to preprocess data for machine learning.
+
+**What does scaling actually mean?**: To scale generally means to change the range of the values. The shape of the distribution doesn’t change. Think about how a scale model of a building has the same proportions as the original, just smaller. That’s why we say it is drawn to scale. The range is often set at 0 to 1.
+
+**What does standardize mean?**: Standardize generally means changing the values so that the distribution **standard** deviation from the mean equals one. It outputs something very close to a normal distribution. Scaling is often implied.
+
+**Why do we need to Scale or Standardize or Normalize?** : Many machine learning algorithms perform better or converge faster when features are on a relatively similar scale and/or close to normally distributed. Examples of such algorithm families include:
+* linear and logistic regression (Remember the famous regression assumptions?)
+* nearest neighbors (Better results with similar scale)
+* principal components analysis (Finds linear combinations of features, if not on same scale, the explained variance will be attributed to features with larger values.)
+* neural networks
+* support vector machines (with some kernels)
+* linear discriminant analysis 
+
+### StandardScaler
+The StandardScaler standardizes a feature by subtracting the mean and then scaling to unit variance. Unit variance means dividing all the values by the standard deviation. This means that some values might be negative and some positive and are not guaranteed to be in -1 to 1 range.
+
+By looking at the values for *bedrooms* for instance, we can see that we have a min value of **-1.591** and a max value of **17.313**. While having negative values by itself is not an issue for PCA analysis, it is not well suited for this particular dataset. As we shall see when we merge this dataset with the features extracted from text which are all in the range 0 to 1, it is better if we have all our numeric features also in the same range of 0 to 1.
+
+For this reason, we are not going to use the StandardScaler.
+
+
+```python
+from sklearn.preprocessing import StandardScaler
+standard_scaler = StandardScaler()
+scaled_df = pd.DataFrame(standard_scaler.fit_transform(df), columns=df.columns)
+outlier_stats(scaled_df)
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>count</th>
+      <th>outliers</th>
+      <th>num_outliers</th>
+      <th>IQR</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>min</th>
+      <th>25%</th>
+      <th>50%</th>
+      <th>75%</th>
+      <th>max</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>bedrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>12668</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-1.591</td>
+      <td>-0.241</td>
+      <td>-0.241</td>
+      <td>-0.241</td>
+      <td>17.313</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_moderate</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10558</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.549</td>
+      <td>-0.549</td>
+      <td>-0.549</td>
+      <td>-0.549</td>
+      <td>1.822</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.487</td>
+      <td>-0.487</td>
+      <td>-0.487</td>
+      <td>-0.487</td>
+      <td>2.052</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-2.052</td>
+      <td>0.487</td>
+      <td>0.487</td>
+      <td>0.487</td>
+      <td>0.487</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.457</td>
+      <td>-0.457</td>
+      <td>-0.457</td>
+      <td>-0.457</td>
+      <td>2.187</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-2.187</td>
+      <td>0.457</td>
+      <td>0.457</td>
+      <td>0.457</td>
+      <td>0.457</td>
+    </tr>
+    <tr>
+      <th>property_type_Apartment</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7000</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-2.348</td>
+      <td>0.426</td>
+      <td>0.426</td>
+      <td>0.426</td>
+      <td>0.426</td>
+    </tr>
+    <tr>
+      <th>bathrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6949</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-2.667</td>
+      <td>-0.333</td>
+      <td>-0.333</td>
+      <td>-0.333</td>
+      <td>33.511</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6034</td>
+      <td>0.028</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.177</td>
+      <td>-0.177</td>
+      <td>-0.177</td>
+      <td>-0.149</td>
+      <td>9.431</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5618</td>
+      <td>0.510</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.519</td>
+      <td>-0.497</td>
+      <td>-0.408</td>
+      <td>0.013</td>
+      <td>13.650</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews_ltm</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5360</td>
+      <td>0.688</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.570</td>
+      <td>-0.570</td>
+      <td>-0.445</td>
+      <td>0.118</td>
+      <td>21.889</td>
+    </tr>
+    <tr>
+      <th>availability_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>4488</td>
+      <td>1.057</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.699</td>
+      <td>-0.699</td>
+      <td>-0.594</td>
+      <td>0.358</td>
+      <td>2.472</td>
+    </tr>
+    <tr>
+      <th>property_type_House</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3846</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.303</td>
+      <td>-0.303</td>
+      <td>-0.303</td>
+      <td>-0.303</td>
+      <td>3.295</td>
+    </tr>
+    <tr>
+      <th>guests_included</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3261</td>
+      <td>0.878</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.448</td>
+      <td>-0.448</td>
+      <td>-0.448</td>
+      <td>0.430</td>
+      <td>12.727</td>
+    </tr>
+    <tr>
+      <th>price_adjusted</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2798</td>
+      <td>0.458</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.500</td>
+      <td>-0.349</td>
+      <td>-0.172</td>
+      <td>0.109</td>
+      <td>60.597</td>
+    </tr>
+    <tr>
+      <th>beds</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2412</td>
+      <td>0.902</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-1.391</td>
+      <td>-0.489</td>
+      <td>-0.489</td>
+      <td>0.413</td>
+      <td>34.699</td>
+    </tr>
+    <tr>
+      <th>property_type_Townhouse</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1659</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.194</td>
+      <td>-0.194</td>
+      <td>-0.194</td>
+      <td>-0.194</td>
+      <td>5.147</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_shared_rooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1539</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.110</td>
+      <td>-0.110</td>
+      <td>-0.110</td>
+      <td>-0.110</td>
+      <td>24.257</td>
+    </tr>
+    <tr>
+      <th>property_type_Condominium</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1495</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.184</td>
+      <td>-0.184</td>
+      <td>-0.184</td>
+      <td>-0.184</td>
+      <td>5.432</td>
+    </tr>
+    <tr>
+      <th>extra_people</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1349</td>
+      <td>1.029</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.587</td>
+      <td>-0.587</td>
+      <td>-0.587</td>
+      <td>0.442</td>
+      <td>11.760</td>
+    </tr>
+    <tr>
+      <th>accommodates</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1261</td>
+      <td>1.082</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.984</td>
+      <td>-0.443</td>
+      <td>-0.443</td>
+      <td>0.639</td>
+      <td>12.542</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.156</td>
+      <td>-0.156</td>
+      <td>-0.156</td>
+      <td>-0.156</td>
+      <td>6.403</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-6.403</td>
+      <td>0.156</td>
+      <td>0.156</td>
+      <td>0.156</td>
+      <td>0.156</td>
+    </tr>
+    <tr>
+      <th>room_type_Shared room</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1062</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.154</td>
+      <td>-0.154</td>
+      <td>-0.154</td>
+      <td>-0.154</td>
+      <td>6.476</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.151</td>
+      <td>-0.151</td>
+      <td>-0.151</td>
+      <td>-0.151</td>
+      <td>6.611</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-6.611</td>
+      <td>0.151</td>
+      <td>0.151</td>
+      <td>0.151</td>
+      <td>0.151</td>
+    </tr>
+    <tr>
+      <th>bed_type_Real Bed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>750</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-7.733</td>
+      <td>0.129</td>
+      <td>0.129</td>
+      <td>0.129</td>
+      <td>0.129</td>
+    </tr>
+    <tr>
+      <th>bed_type_Futon</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>280</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.079</td>
+      <td>-0.079</td>
+      <td>-0.079</td>
+      <td>-0.079</td>
+      <td>12.723</td>
+    </tr>
+    <tr>
+      <th>bed_type_Pull-out Sofa</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>240</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.073</td>
+      <td>-0.073</td>
+      <td>-0.073</td>
+      <td>-0.073</td>
+      <td>13.748</td>
+    </tr>
+    <tr>
+      <th>bed_type_Airbed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>166</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.060</td>
+      <td>-0.060</td>
+      <td>-0.060</td>
+      <td>-0.060</td>
+      <td>16.545</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_60</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>22.122</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-22.122</td>
+      <td>0.045</td>
+      <td>0.045</td>
+      <td>0.045</td>
+      <td>0.045</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>-0.045</td>
+      <td>22.122</td>
+    </tr>
+    <tr>
+      <th>bed_type_Couch</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>64</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.037</td>
+      <td>-0.037</td>
+      <td>-0.037</td>
+      <td>-0.037</td>
+      <td>26.675</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>22</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.022</td>
+      <td>-0.022</td>
+      <td>-0.022</td>
+      <td>-0.022</td>
+      <td>45.519</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5</td>
+      <td>0.000</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.010</td>
+      <td>-0.010</td>
+      <td>-0.010</td>
+      <td>-0.010</td>
+      <td>95.499</td>
+    </tr>
+    <tr>
+      <th>availability_60</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.326</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.752</td>
+      <td>-0.752</td>
+      <td>-0.548</td>
+      <td>0.574</td>
+      <td>2.308</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict_14_with_grace_period</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.011</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.902</td>
+      <td>-0.902</td>
+      <td>-0.902</td>
+      <td>1.109</td>
+      <td>1.109</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.001</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.969</td>
+      <td>-0.969</td>
+      <td>-0.969</td>
+      <td>1.032</td>
+      <td>1.032</td>
+    </tr>
+    <tr>
+      <th>requires_license_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_flexible</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.148</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-0.682</td>
+      <td>-0.682</td>
+      <td>-0.682</td>
+      <td>1.466</td>
+      <td>1.466</td>
+    </tr>
+    <tr>
+      <th>is_business_travel_ready_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.076</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.760</td>
+      <td>-0.760</td>
+      <td>-0.760</td>
+      <td>1.316</td>
+      <td>1.316</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.076</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-1.316</td>
+      <td>-1.316</td>
+      <td>0.760</td>
+      <td>0.760</td>
+      <td>0.760</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.001</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>-1.032</td>
+      <td>-1.032</td>
+      <td>0.969</td>
+      <td>0.969</td>
+      <td>0.969</td>
+    </tr>
+    <tr>
+      <th>requires_license_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+    </tr>
+    <tr>
+      <th>has_availability_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+    </tr>
+    <tr>
+      <th>room_type_Private room</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.006</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.926</td>
+      <td>-0.926</td>
+      <td>-0.926</td>
+      <td>1.080</td>
+      <td>1.080</td>
+    </tr>
+    <tr>
+      <th>availability_90</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.522</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-0.803</td>
+      <td>-0.803</td>
+      <td>-0.544</td>
+      <td>0.719</td>
+      <td>2.110</td>
+    </tr>
+    <tr>
+      <th>room_type_Entire home/apt</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>2.001</td>
+      <td>-0.0</td>
+      <td>1.0</td>
+      <td>-1.031</td>
+      <td>-1.031</td>
+      <td>0.970</td>
+      <td>0.970</td>
+      <td>0.970</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+### MinMaxScaler
+The MinMaxScaler works by taking each value in a feature and subtracts it by the minimum value and divides it by the range. The range is the difference between the original maximum and original minimum. 
+
+MinMaxScaler preserves the shape of the original distribution. It doesn’t meaningfully change the information embedded in the original data. This is exactly what we want for our dataset. We want to preserve the individual feature distributions while bringing all the features to a 0 to 1 scale. The reason we are doing this is because for the Text Features, we have made use of `TfidfVectorizer` which translates the text features to numeric values that are in range 0 to 1.
+
+For this reason, we will be using MinMaxScaler.
+
+
+```python
+from sklearn.preprocessing import MinMaxScaler
+min_max_scaler = MinMaxScaler()
+min_max_scaled_df = pd.DataFrame(min_max_scaler.fit_transform(df), columns=df.columns)
+outlier_stats(min_max_scaled_df)
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>count</th>
+      <th>outliers</th>
+      <th>num_outliers</th>
+      <th>IQR</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>min</th>
+      <th>25%</th>
+      <th>50%</th>
+      <th>75%</th>
+      <th>max</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>bedrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>12668</td>
+      <td>0.000</td>
+      <td>0.084</td>
+      <td>0.053</td>
+      <td>0.0</td>
+      <td>0.071</td>
+      <td>0.071</td>
+      <td>0.071</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_moderate</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10558</td>
+      <td>0.000</td>
+      <td>0.232</td>
+      <td>0.422</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.000</td>
+      <td>0.808</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_is_superhost_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8752</td>
+      <td>0.000</td>
+      <td>0.192</td>
+      <td>0.394</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.000</td>
+      <td>0.173</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>is_location_exact_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7887</td>
+      <td>0.000</td>
+      <td>0.827</td>
+      <td>0.378</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Apartment</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>7000</td>
+      <td>0.000</td>
+      <td>0.847</td>
+      <td>0.360</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bathrooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6949</td>
+      <td>0.000</td>
+      <td>0.074</td>
+      <td>0.028</td>
+      <td>0.0</td>
+      <td>0.065</td>
+      <td>0.065</td>
+      <td>0.065</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>6034</td>
+      <td>0.003</td>
+      <td>0.018</td>
+      <td>0.104</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.003</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5618</td>
+      <td>0.036</td>
+      <td>0.037</td>
+      <td>0.071</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.008</td>
+      <td>0.038</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>number_of_reviews_ltm</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5360</td>
+      <td>0.031</td>
+      <td>0.025</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.006</td>
+      <td>0.031</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>4488</td>
+      <td>0.333</td>
+      <td>0.220</td>
+      <td>0.315</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.033</td>
+      <td>0.333</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_House</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3846</td>
+      <td>0.000</td>
+      <td>0.084</td>
+      <td>0.278</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>guests_included</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3261</td>
+      <td>0.067</td>
+      <td>0.034</td>
+      <td>0.076</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.067</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>price_adjusted</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2798</td>
+      <td>0.008</td>
+      <td>0.008</td>
+      <td>0.016</td>
+      <td>0.0</td>
+      <td>0.002</td>
+      <td>0.005</td>
+      <td>0.010</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>beds</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>2412</td>
+      <td>0.025</td>
+      <td>0.039</td>
+      <td>0.028</td>
+      <td>0.0</td>
+      <td>0.025</td>
+      <td>0.025</td>
+      <td>0.050</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>accommodates</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1703</td>
+      <td>0.080</td>
+      <td>0.073</td>
+      <td>0.074</td>
+      <td>0.0</td>
+      <td>0.040</td>
+      <td>0.040</td>
+      <td>0.120</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Townhouse</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1659</td>
+      <td>0.000</td>
+      <td>0.036</td>
+      <td>0.187</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>calculated_host_listings_count_shared_rooms</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1539</td>
+      <td>0.000</td>
+      <td>0.005</td>
+      <td>0.041</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>property_type_Condominium</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1495</td>
+      <td>0.000</td>
+      <td>0.033</td>
+      <td>0.178</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>extra_people</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1349</td>
+      <td>0.083</td>
+      <td>0.048</td>
+      <td>0.081</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.083</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.000</td>
+      <td>0.024</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_phone_verification_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1086</td>
+      <td>0.000</td>
+      <td>0.976</td>
+      <td>0.152</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Shared room</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1062</td>
+      <td>0.000</td>
+      <td>0.023</td>
+      <td>0.151</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.000</td>
+      <td>0.978</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>require_guest_profile_picture_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1020</td>
+      <td>0.000</td>
+      <td>0.022</td>
+      <td>0.148</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Real Bed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>750</td>
+      <td>0.000</td>
+      <td>0.984</td>
+      <td>0.127</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Futon</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>280</td>
+      <td>0.000</td>
+      <td>0.006</td>
+      <td>0.078</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Pull-out Sofa</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>240</td>
+      <td>0.000</td>
+      <td>0.005</td>
+      <td>0.072</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Airbed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>166</td>
+      <td>0.000</td>
+      <td>0.004</td>
+      <td>0.060</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_f</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_has_profile_pic_t</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>0.998</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_60</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>93</td>
+      <td>0.000</td>
+      <td>0.002</td>
+      <td>0.045</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>bed_type_Couch</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>64</td>
+      <td>0.000</td>
+      <td>0.001</td>
+      <td>0.037</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_super_strict_30</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>22</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.022</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>5</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.010</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_flexible</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.318</td>
+      <td>0.466</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>cancellation_policy_strict_14_with_grace_period</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.448</td>
+      <td>0.497</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.516</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>has_availability_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>is_business_travel_ready_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.366</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>instant_bookable_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.634</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>requires_license_f</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>host_identity_verified_t</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.484</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Private room</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.462</td>
+      <td>0.499</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_60</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.433</td>
+      <td>0.246</td>
+      <td>0.327</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.067</td>
+      <td>0.433</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>availability_90</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>0.522</td>
+      <td>0.276</td>
+      <td>0.343</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.089</td>
+      <td>0.522</td>
+      <td>1.0</td>
+    </tr>
+    <tr>
+      <th>room_type_Entire home/apt</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.000</td>
+      <td>0.515</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>1.000</td>
+      <td>1.000</td>
+      <td>1.0</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+### RobustScaler
+Yet another Scaler is the RobustScaler. The MinMaxScaler is suseptible to outliers, whereas the RobustScaler is not. However, RobustScaler can generate values that outside the range 0 to 1. Moreover, we have dealt with the outlier above in a reasonable manner, so we should be good with using the MinMaxScaler for this dataset.
+
+
+```python
+from sklearn.preprocessing import RobustScaler
+scaler = RobustScaler()
+scaled_final_df = scaler.fit_transform(final_df)
+scaled_final_df = pd.DataFrame(scaled_final_df, columns=final_df.columns)
+
+scaled_final_df.head()
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>host_listings_count</th>
+      <th>host_total_listings_count</th>
+      <th>accommodates</th>
+      <th>bathrooms</th>
+      <th>bedrooms</th>
+      <th>beds</th>
+      <th>price</th>
+      <th>guests_included</th>
+      <th>extra_people</th>
+      <th>minimum_nights</th>
+      <th>...</th>
+      <th>description_contains_yankee</th>
+      <th>description_contains_yard</th>
+      <th>description_contains_year</th>
+      <th>description_contains_yellow</th>
+      <th>description_contains_yoga</th>
+      <th>description_contains_york</th>
+      <th>description_contains_young</th>
+      <th>description_contains_yummy</th>
+      <th>description_contains_zero</th>
+      <th>description_contains_zone</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>4.0</td>
+      <td>4.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>-1.0</td>
+      <td>0.0</td>
+      <td>1.157407</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>-0.50</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.462963</td>
+      <td>1.0</td>
+      <td>0.8</td>
+      <td>0.00</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>-0.5</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>-0.185185</td>
+      <td>0.0</td>
+      <td>0.8</td>
+      <td>1.75</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.137645</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.925926</td>
+      <td>1.0</td>
+      <td>4.0</td>
+      <td>0.00</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.074083</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>-0.370370</td>
+      <td>0.0</td>
+      <td>1.2</td>
+      <td>10.50</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.18384</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+  </tbody>
+</table>
+<p>5 rows × 2208 columns</p>
+</div>
+
+
+
+## Merge the feature engineered dataset this dataset
+In this section, we will be taking the feature engineered dataset that was created as part of this post: [test](test) and merge it with the current dataset. Recall, that the featured engineered data set contains Text features along with some newly created categorical features.
+
+
+```python
+merged_df = pd.read_csv('merged_df.csv')
+```
+
+
+```python
+merged_df.head()
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>amenities_tv</th>
+      <th>amenities_wifi</th>
+      <th>amenities_air_conditioning</th>
+      <th>amenities_kitchen</th>
+      <th>amenities_paid_parking_off_premises</th>
+      <th>amenities_free_street_parking</th>
+      <th>amenities_indoor_fireplace</th>
+      <th>amenities_heating</th>
+      <th>amenities_family/kid_friendly</th>
+      <th>amenities_smoke_detector</th>
+      <th>...</th>
+      <th>description_contains_yankee</th>
+      <th>description_contains_yard</th>
+      <th>description_contains_year</th>
+      <th>description_contains_yellow</th>
+      <th>description_contains_yoga</th>
+      <th>description_contains_york</th>
+      <th>description_contains_young</th>
+      <th>description_contains_yummy</th>
+      <th>description_contains_zero</th>
+      <th>description_contains_zone</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.137645</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.074083</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.18384</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+  </tbody>
+</table>
+<p>5 rows × 2151 columns</p>
+</div>
+
+
+
+
+```python
+# check if there are any glaring outliers.
+outlier_stats(merged_df)
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>count</th>
+      <th>outliers</th>
+      <th>num_outliers</th>
+      <th>IQR</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>min</th>
+      <th>25%</th>
+      <th>50%</th>
+      <th>75%</th>
+      <th>max</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>description_contains_home</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11384</td>
+      <td>0.0</td>
+      <td>0.026</td>
+      <td>0.054</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.916</td>
+    </tr>
+    <tr>
+      <th>description_contains_place</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11317</td>
+      <td>0.0</td>
+      <td>0.030</td>
+      <td>0.069</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_city</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11249</td>
+      <td>0.0</td>
+      <td>0.024</td>
+      <td>0.048</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.596</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_selfie</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11126</td>
+      <td>0.0</td>
+      <td>0.244</td>
+      <td>0.429</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_coffee_maker</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11087</td>
+      <td>0.0</td>
+      <td>0.243</td>
+      <td>0.429</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_quiet</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>11035</td>
+      <td>0.0</td>
+      <td>0.024</td>
+      <td>0.048</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_kba</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10985</td>
+      <td>0.0</td>
+      <td>0.241</td>
+      <td>0.428</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_brooklyn</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10794</td>
+      <td>0.0</td>
+      <td>0.029</td>
+      <td>0.063</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.679</td>
+    </tr>
+    <tr>
+      <th>amenities_cable_tv</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10706</td>
+      <td>0.0</td>
+      <td>0.235</td>
+      <td>0.424</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_large</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10567</td>
+      <td>0.0</td>
+      <td>0.025</td>
+      <td>0.055</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.762</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_facebook</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10428</td>
+      <td>0.0</td>
+      <td>0.229</td>
+      <td>0.420</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_time</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10350</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.047</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_self_check-in</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10233</td>
+      <td>0.0</td>
+      <td>0.224</td>
+      <td>0.417</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_buzzer/wireless_intercom</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10076</td>
+      <td>0.0</td>
+      <td>0.221</td>
+      <td>0.415</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_identity_manual</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>10025</td>
+      <td>0.0</td>
+      <td>0.220</td>
+      <td>0.414</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_beautiful</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>9867</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.049</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_need</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>9819</td>
+      <td>0.0</td>
+      <td>0.020</td>
+      <td>0.044</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.421</td>
+    </tr>
+    <tr>
+      <th>description_contains_spacious</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>9774</td>
+      <td>0.0</td>
+      <td>0.021</td>
+      <td>0.047</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_clean</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>9447</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.050</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.709</td>
+    </tr>
+    <tr>
+      <th>description_contains_line</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>9067</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.051</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_long_term_stays_allowed</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8831</td>
+      <td>0.0</td>
+      <td>0.194</td>
+      <td>0.395</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_extra_pillows_and_blankets</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8798</td>
+      <td>0.0</td>
+      <td>0.193</td>
+      <td>0.395</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_share</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8777</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.053</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_include</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8605</td>
+      <td>0.0</td>
+      <td>0.018</td>
+      <td>0.043</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.489</td>
+    </tr>
+    <tr>
+      <th>description_contains_central</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8570</td>
+      <td>0.0</td>
+      <td>0.022</td>
+      <td>0.052</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>description_contains_comfortable</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8331</td>
+      <td>0.0</td>
+      <td>0.018</td>
+      <td>0.043</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.748</td>
+    </tr>
+    <tr>
+      <th>description_contains_walking</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8194</td>
+      <td>0.0</td>
+      <td>0.019</td>
+      <td>0.047</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.571</td>
+    </tr>
+    <tr>
+      <th>description_contains_fully</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8175</td>
+      <td>0.0</td>
+      <td>0.018</td>
+      <td>0.043</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.658</td>
+    </tr>
+    <tr>
+      <th>amenities_private_entrance</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8109</td>
+      <td>0.0</td>
+      <td>0.178</td>
+      <td>0.382</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_translation_missing:_en.hosting_amenity_50</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>8104</td>
+      <td>0.0</td>
+      <td>0.178</td>
+      <td>0.382</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>...</th>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+      <td>...</td>
+    </tr>
+    <tr>
+      <th>amenities_ceiling_hoist</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>3</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.008</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_fixed_grab_bars_for_shower.1</th>
+      <td>45605.0</td>
+      <td>True</td>
+      <td>1</td>
+      <td>0.0</td>
+      <td>0.000</td>
+      <td>0.005</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_lock_on_bedroom_door</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.372</td>
+      <td>0.483</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_laptop_friendly_workspace</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.623</td>
+      <td>0.485</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_iron</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.607</td>
+      <td>0.488</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_hair_dryer</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.649</td>
+      <td>0.477</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_hangers</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.734</td>
+      <td>0.442</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_carbon_monoxide_detector</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.689</td>
+      <td>0.463</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_shampoo</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.671</td>
+      <td>0.470</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_fire_extinguisher</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.367</td>
+      <td>0.482</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_government_id</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.601</td>
+      <td>0.490</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_family/kid_friendly</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.269</td>
+      <td>0.443</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_offline_government_id</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.389</td>
+      <td>0.488</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_free_street_parking</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.301</td>
+      <td>0.459</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_hot_water</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.492</td>
+      <td>0.500</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_dishes_and_silverware</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.292</td>
+      <td>0.455</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_bed_linens</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.286</td>
+      <td>0.452</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_refrigerator</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.327</td>
+      <td>0.469</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_cooking_basics</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.273</td>
+      <td>0.446</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_oven</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.283</td>
+      <td>0.451</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_stove</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.287</td>
+      <td>0.452</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_internet</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.306</td>
+      <td>0.461</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_elevator</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.270</td>
+      <td>0.444</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_washer</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.405</td>
+      <td>0.491</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_dryer</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.397</td>
+      <td>0.489</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_microwave</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.275</td>
+      <td>0.447</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_first_aid_kit</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.327</td>
+      <td>0.469</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_jumio</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.456</td>
+      <td>0.498</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>host_verification_by_reviews</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.722</td>
+      <td>0.448</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+    <tr>
+      <th>amenities_tv</th>
+      <td>45605.0</td>
+      <td>False</td>
+      <td>0</td>
+      <td>1.0</td>
+      <td>0.671</td>
+      <td>0.470</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>1.0</td>
+      <td>1.0</td>
+      <td>1.000</td>
+    </tr>
+  </tbody>
+</table>
+<p>2151 rows × 11 columns</p>
+</div>
+
+
+
+As pointed out earlier, we will be using the `MinMaxScaler` as our preferred scaling option. We will be merging this with the feature engineered dataset.
+
+
+```python
+# merge them both
+final_df = pd.concat([min_max_scaled_df, merged_df], axis='columns')
+```
+
+## Upload pre-processed dataset to S3
+
+
+```python
+final_df.to_csv('min_max_scaled_final_df.csv', index=False)
+
+# boto3 client to get S3 data
+s3_client = boto3.client('s3')
+bucket_name='skuchkula-sagemaker-airbnb'
+
+# upload it to S3
+s3_client.upload_file(Bucket=bucket_name, 
+                      Filename='min_max_scaled_final_df.csv', 
+                      Key='feature_eng/min_max_scaled_final_df.csv')
+```
+
+## Conclusion
+We have come a long way from the raw dataset to the final dataset which is ready for modeling. Along the way we dealt with missing values, incorrect data types, outliers, scaling and created several new features that will help us group Airbnb listings that are similar to each other. Our final data set consists of **45,604** listings, with each having **2201** features. Shown below is the shape and head of this final dataset.
+
+
+```python
+final_df.shape
+```
+
+
+
+
+    (45605, 2201)
+
+
+
+
+```python
+final_df.head()
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>accommodates</th>
+      <th>bathrooms</th>
+      <th>bedrooms</th>
+      <th>beds</th>
+      <th>guests_included</th>
+      <th>extra_people</th>
+      <th>availability_30</th>
+      <th>availability_60</th>
+      <th>availability_90</th>
+      <th>number_of_reviews</th>
+      <th>...</th>
+      <th>description_contains_yankee</th>
+      <th>description_contains_yard</th>
+      <th>description_contains_year</th>
+      <th>description_contains_yellow</th>
+      <th>description_contains_yoga</th>
+      <th>description_contains_york</th>
+      <th>description_contains_young</th>
+      <th>description_contains_yummy</th>
+      <th>description_contains_zero</th>
+      <th>description_contains_zone</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>0.04</td>
+      <td>0.064516</td>
+      <td>0.000000</td>
+      <td>0.025</td>
+      <td>0.066667</td>
+      <td>0.000000</td>
+      <td>0.433333</td>
+      <td>0.283333</td>
+      <td>0.344444</td>
+      <td>0.071987</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>0.04</td>
+      <td>0.064516</td>
+      <td>0.071429</td>
+      <td>0.025</td>
+      <td>0.066667</td>
+      <td>0.066667</td>
+      <td>1.000000</td>
+      <td>1.000000</td>
+      <td>1.000000</td>
+      <td>0.000000</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>0.00</td>
+      <td>0.064516</td>
+      <td>0.071429</td>
+      <td>0.025</td>
+      <td>0.000000</td>
+      <td>0.066667</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.014085</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.137645</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>0.04</td>
+      <td>0.064516</td>
+      <td>0.071429</td>
+      <td>0.025</td>
+      <td>0.066667</td>
+      <td>0.333333</td>
+      <td>0.800000</td>
+      <td>0.550000</td>
+      <td>0.700000</td>
+      <td>0.117371</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.00000</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.074083</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>0.04</td>
+      <td>0.064516</td>
+      <td>0.071429</td>
+      <td>0.025</td>
+      <td>0.000000</td>
+      <td>0.100000</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.076682</td>
+      <td>...</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.18384</td>
+      <td>0.0</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+      <td>0.0</td>
+    </tr>
+  </tbody>
+</table>
+<p>5 rows × 2201 columns</p>
+</div>
+
+
