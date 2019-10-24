@@ -33,6 +33,15 @@ Following along the CRISP-DM process, I have created a series of blog posts whic
 * New York City Airbnb Modeling: K-means clustering (https://shravan-kuchkula.github.io/nyc-airbnb-kmeans/): Find similar airbnb listings using K-means clustering. Used a folium map to display the clustering results for easy interactivity and to find similar listings based on location.
 * Deploy the data dashboard app to Heroku: (https://shravan-kuchkula.github.io/nyc-airbnb-deploy-to-heroku/): Use Flask + Pandas + Plotly + Dash to deploy a data dashboard application to the cloud.
 
+Tools used to build the visualizations in this post:
+
+All the visualizations have been created in python 🐍 
+**Geopandas:** Makes working with geospatial data in python easier. If you have the latitude and longitude information, then you can build a geopandas dataframe and start using all the pandas features like filtering, grouping, merging on spatial components. I was fascinated by its simplicity and power. Read here on how to install it: [install GeoPandas]
+**Folium:** folium makes it easy to visualize data that's been manipulated in Python on an interactive leaflet map. It enables both the binding of data to a map for choropleth visualizations as well as passing rich vector/raster/HTML visualizations as markers on the map.
+**Plotly Express:** Plotly has improved greatly over the years and they newest release made using plotly.express a piece of cake. You can embed plotly visualizations virtually anywhere now. Read this blog to see what is possible with it: [Plotly 4.0]
+**Dash:** It is written on top of Flask, Plotly.js and React.js. Dash is ideal for building data visualization apps with highly custom user interfaces in pure Python. It's particularly suited for anyone who works with data in Python.
+**Heroku:** In my opinion, the quickest way to have a python app on the cloud is by using Heroku PaaS. They made it really simple, here are the steps to do it from scratch. [Deploy a data dashboard to Heroku]
+
 
 Project Organization
 ------------
